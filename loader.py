@@ -3,52 +3,55 @@
 import math
 import struct
 import typing
+from enum import Enum, auto
 
 import numpy as np
 import torch
+from torch import Tensor
+from transformers import LlamaConfig, LlamaForCausalLM
+
 
 # https://github.com/ggml-org/llama.cpp/blob/master/ggml/include/ggml.h
-GGML_TYPE_LOOKUP = [
-    "GGML_TYPE_F32",
-    "GGML_TYPE_F16",
-    "GGML_TYPE_Q4_0",
-    "GGML_TYPE_Q4_1",
-    "GGML_TYPE_Q4_2",  # (removed)
-    "GGML_TYPE_Q4_3",  # (removed)
-    "GGML_TYPE_Q5_0",
-    "GGML_TYPE_Q5_1",
-    "GGML_TYPE_Q8_0",
-    "GGML_TYPE_Q8_1",
-    "GGML_TYPE_Q2_K",
-    "GGML_TYPE_Q3_K",
-    "GGML_TYPE_Q4_K",
-    "GGML_TYPE_Q5_K",
-    "GGML_TYPE_Q6_K",
-    "GGML_TYPE_Q8_K",
-    "GGML_TYPE_IQ2_XXS",
-    "GGML_TYPE_IQ2_XS",
-    "GGML_TYPE_IQ3_XXS",
-    "GGML_TYPE_IQ1_S",
-    "GGML_TYPE_IQ4_NL",
-    "GGML_TYPE_IQ3_S",
-    "GGML_TYPE_IQ2_S",
-    "GGML_TYPE_IQ4_XS",
-    "GGML_TYPE_I8",
-    "GGML_TYPE_I16",
-    "GGML_TYPE_I32",
-    "GGML_TYPE_I64",
-    "GGML_TYPE_F64",
-    "GGML_TYPE_IQ1_M",
-    "GGML_TYPE_BF16",
-    "GGML_TYPE_Q4_0_4_4",  # (removed)
-    "GGML_TYPE_Q4_0_4_8",  # (removed)
-    "GGML_TYPE_Q4_0_8_8",  # (removed)
-    "GGML_TYPE_TQ1_0",
-    "GGML_TYPE_TQ2_0",
-    "GGML_TYPE_IQ4_NL_4_4",  # (removed)
-    "GGML_TYPE_IQ4_NL_4_8",  # (removed)
-    "GGML_TYPE_IQ4_NL_8_8",  # (removed)
-]
+class GGML_TYPE(Enum):
+    F32 = 0  # auto() starts with 1
+    F16 = auto()
+    Q4_0 = auto()
+    Q4_1 = auto()
+    Q4_2 = auto()  # (removed)
+    Q4_3 = auto()  # (removed)
+    Q5_0 = auto()
+    Q5_1 = auto()
+    Q8_0 = auto()
+    Q8_1 = auto()
+    Q2_K = auto()
+    Q3_K = auto()
+    Q4_K = auto()
+    Q5_K = auto()
+    Q6_K = auto()
+    Q8_K = auto()
+    IQ2_XXS = auto()
+    IQ2_XS = auto()
+    IQ3_XXS = auto()
+    IQ1_S = auto()
+    IQ4_NL = auto()
+    IQ3_S = auto()
+    IQ2_S = auto()
+    IQ4_XS = auto()
+    I8 = auto()
+    I16 = auto()
+    I32 = auto()
+    I64 = auto()
+    F64 = auto()
+    IQ1_M = auto()
+    BF16 = auto()
+    Q4_0_4_4 = auto()  # (removed)
+    Q4_0_4_8 = auto()  # (removed)
+    Q4_0_8_8 = auto()  # (removed)
+    TQ1_0 = auto()
+    TQ2_0 = auto()
+    IQ4_NL_4_4 = auto()  # (removed)
+    IQ4_NL_4_8 = auto()  # (removed)
+    IQ4_NL_8_8 = auto()  # (removed)
 
 
 def _decode_number(f: typing.BinaryIO, dtype: str):
@@ -124,7 +127,7 @@ def load_gguf(filename: str):
         name = _decode_str(f)
         ndim = _decode_number(f, "u32")
         shape = [_decode_number(f, "u64") for _ in range(ndim)][::-1]  # shape order is reversed in GGML
-        ggml_type = GGML_TYPE_LOOKUP[_decode_number(f, "u32")]
+        ggml_type = GGML_TYPE(_decode_number(f, "u32"))
         offset = _decode_number(f, "u64")
 
         state_dict_meta[name] = (shape, ggml_type, offset)
@@ -139,16 +142,16 @@ def load_gguf(filename: str):
     for name, (shape, ggml_type, offset) in state_dict_meta.items():
         numel = math.prod(shape)
 
-        basic_dtype_lookup = dict(
-            GGML_TYPE_F64=torch.float64,
-            GGML_TYPE_F32=torch.float32,
-            GGML_TYPE_F16=torch.float16,
-            GGML_TYPE_BF16=torch.bfloat16,
-            GGML_TYPE_I8=torch.int8,
-            GGML_TYPE_I16=torch.int16,
-            GGML_TYPE_I32=torch.int32,
-            GGML_TYPE_I64=torch.int64,
-        )
+        basic_dtype_lookup = {
+            GGML_TYPE.F64: torch.float64,
+            GGML_TYPE.F32: torch.float32,
+            GGML_TYPE.F16: torch.float16,
+            GGML_TYPE.BF16: torch.bfloat16,
+            GGML_TYPE.I8: torch.int8,
+            GGML_TYPE.I16: torch.int16,
+            GGML_TYPE.I32: torch.int32,
+            GGML_TYPE.I64: torch.int64,
+        }
 
         if ggml_type not in basic_dtype_lookup:
             raise ValueError(f"Unsupported {ggml_type=}")
@@ -158,3 +161,74 @@ def load_gguf(filename: str):
         state_dict[name] = tensor
 
     return metadata, state_dict
+
+
+def _load_llama(metadata: dict[str, int | float | str], gguf_state_dict: dict[str, Tensor]):
+    config = LlamaConfig(
+        max_position_embeddings=metadata["llama.context_length"],
+        hidden_size=metadata["llama.embedding_length"],
+        num_hidden_layers=metadata["llama.block_count"],
+        intermediate_size=metadata["llama.feed_forward_length"],
+        num_attention_heads=metadata["llama.attention.head_count"],
+        num_key_value_heads=metadata["llama.attention.head_count_kv"],
+        rms_norm_eps=metadata["llama.attention.layer_norm_rms_epsilon"],
+        rope_theta=metadata["llama.rope.freq_base"],
+        head_dim=metadata["llama.attention.key_length"],
+        vocab_size=metadata["llama.vocab_size"],
+        tie_word_embeddings="output.weight" not in gguf_state_dict,
+    )
+
+    def map_key(k: str):
+        k = k.replace("token_embd.", "model.embed_tokens.")
+        k = k.replace("blk.", "model.layers.")
+        k = k.replace(".attn_norm.", ".input_layernorm.")
+        k = k.replace(".attn_q.", ".self_attn.q_proj.")
+        k = k.replace(".attn_k.", ".self_attn.k_proj.")
+        k = k.replace(".attn_v.", ".self_attn.v_proj.")
+        k = k.replace(".attn_output.", ".self_attn.o_proj.")
+        k = k.replace(".ffn_norm.", ".post_attention_layernorm.")
+        k = k.replace(".ffn_up.", ".mlp.up_proj.")
+        k = k.replace(".ffn_gate.", ".mlp.gate_proj.")
+        k = k.replace(".ffn_down.", ".mlp.down_proj.")
+        k = k.replace("output_norm.", "model.norm.")
+        return k
+
+    with torch.device("meta"):
+        model = LlamaForCausalLM(config)
+
+    pt_state_dict = dict()
+    for k, v in gguf_state_dict.items():
+        if k.endswith(".attn_q.weight"):
+            v = v.view(config.num_attention_heads, -1, 2, config.hidden_size).transpose(1, 2).reshape(v.shape)
+        elif k.endswith((".attn_k.weight", ".attn_v.weight")):
+            v = v.view(config.num_key_value_heads, -1, 2, config.hidden_size).transpose(1, 2).reshape(v.shape)
+        pt_state_dict[map_key(k)] = v
+
+    missing_keys, unexpected_keys = model.load_state_dict(pt_state_dict, assign=True, strict=False)
+    if config.tie_word_embeddings:
+        model.tie_weights()
+        missing_keys.remove("lm_head.weight")
+
+    unexpected_keys.remove("rope_freqs.weight")  # TODO: check this
+    assert len(missing_keys) == 0 and len(unexpected_keys) == 0
+
+    return model
+
+
+def load_gguf_model(filename: str):
+    metadata, state_dict = load_gguf(filename)
+    arch = metadata["general.architecture"]
+
+    normal_dtype = torch.bfloat16 if any(v.dtype == torch.bfloat16 for v in state_dict.values()) else torch.float16
+
+    for k, v in state_dict.items():
+        if k.endswith("_norm.weight"):
+            state_dict[k] = v.to(normal_dtype)
+
+    if arch == "llama":
+        model = _load_llama(metadata, state_dict)
+
+    else:
+        raise RuntimeError(f"Unsupported {arch=}")
+
+    return model
