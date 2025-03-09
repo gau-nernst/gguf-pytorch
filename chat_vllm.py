@@ -9,7 +9,7 @@ os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
-from loader import load_gguf
+from gguf_pytorch.loader import load_gguf
 
 
 async def main():

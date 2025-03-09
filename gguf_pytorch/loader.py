@@ -3,55 +3,13 @@
 import math
 import struct
 import typing
-from enum import Enum, auto
 
 import numpy as np
 import torch
 
-from converters import CONVERTER_LOOKUP, LOADER_LOOKUP
-
-
-# https://github.com/ggml-org/llama.cpp/blob/master/ggml/include/ggml.h
-class GGML_TYPE(Enum):
-    F32 = 0  # auto() starts with 1
-    F16 = auto()
-    Q4_0 = auto()
-    Q4_1 = auto()
-    Q4_2 = auto()  # (removed)
-    Q4_3 = auto()  # (removed)
-    Q5_0 = auto()
-    Q5_1 = auto()
-    Q8_0 = auto()
-    Q8_1 = auto()
-    Q2_K = auto()
-    Q3_K = auto()
-    Q4_K = auto()
-    Q5_K = auto()
-    Q6_K = auto()
-    Q8_K = auto()
-    IQ2_XXS = auto()
-    IQ2_XS = auto()
-    IQ3_XXS = auto()
-    IQ1_S = auto()
-    IQ4_NL = auto()
-    IQ3_S = auto()
-    IQ2_S = auto()
-    IQ4_XS = auto()
-    I8 = auto()
-    I16 = auto()
-    I32 = auto()
-    I64 = auto()
-    F64 = auto()
-    IQ1_M = auto()
-    BF16 = auto()
-    Q4_0_4_4 = auto()  # (removed)
-    Q4_0_4_8 = auto()  # (removed)
-    Q4_0_8_8 = auto()  # (removed)
-    TQ1_0 = auto()
-    TQ2_0 = auto()
-    IQ4_NL_4_4 = auto()  # (removed)
-    IQ4_NL_4_8 = auto()  # (removed)
-    IQ4_NL_8_8 = auto()  # (removed)
+from .constants import GGML_TYPE
+from .converters import CONVERTER_LOOKUP, LOADER_LOOKUP
+from .subclasses import SUBCLASS_TYPE_LOOKUP
 
 
 def _decode_number(f: typing.BinaryIO, dtype: str):
@@ -142,7 +100,7 @@ def load_gguf(filename: str, format: str = "gguf"):
     for name, (shape, ggml_type, offset) in state_dict_meta.items():
         numel = math.prod(shape)
 
-        basic_dtype_lookup = {
+        BASIC_TYPE_LOOKUP = {
             GGML_TYPE.F64: torch.float64,
             GGML_TYPE.F32: torch.float32,
             GGML_TYPE.F16: torch.float16,
@@ -153,11 +111,17 @@ def load_gguf(filename: str, format: str = "gguf"):
             GGML_TYPE.I64: torch.int64,
         }
 
-        if ggml_type not in basic_dtype_lookup:
+        if ggml_type in BASIC_TYPE_LOOKUP:
+            dtype = BASIC_TYPE_LOOKUP[ggml_type]
+            tensor = tensor_data[offset : offset + numel * dtype.itemsize].view(dtype).view(shape)
+
+        elif ggml_type in SUBCLASS_TYPE_LOOKUP:
+            subclass = SUBCLASS_TYPE_LOOKUP[ggml_type]
+            tensor = subclass.from_buffer(tensor_data[offset:], ggml_type, shape)
+
+        else:
             raise ValueError(f"Unsupported {ggml_type=}")
 
-        dtype = basic_dtype_lookup[ggml_type]
-        tensor = tensor_data[offset : offset + numel * dtype.itemsize].view(dtype).view(shape)
         state_dict[name] = tensor
 
     if format != "gguf":
