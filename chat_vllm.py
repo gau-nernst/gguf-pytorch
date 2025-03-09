@@ -9,7 +9,7 @@ os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
-from gguf_pytorch.loader import load_gguf
+from gguf_pytorch import load_gguf, load_state_dict
 
 
 async def main():
@@ -26,7 +26,7 @@ async def main():
     # we must use async API to stream outputs
     if args.model.endswith(".gguf"):
         assert args.tokenizer is not None
-        config, state_dict = load_gguf(args.model, format="hf")
+        config, state_dict = load_gguf(args.model, format="vllm")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config.save_pretrained(tmpdir)
@@ -35,12 +35,15 @@ async def main():
                 tokenizer=args.tokenizer,
                 enable_prefix_caching=True,
                 load_format="dummy",
+                enforce_eager=True,
             )
             llm = AsyncLLMEngine.from_engine_args(engine_args)
 
-        # TODO: when we use tensor subclass, we will switch to .load_state_dict(assign=True)
+        # TODO: enable torch.compile and figure out how to re-enable CUDA graph
+        device = llm.engine.model_executor.driver_worker.device
         model = llm.engine.model_executor.driver_worker.worker.model_runner.model
-        model.load_weights(state_dict.items())
+        load_state_dict(model, state_dict, assign=True)
+        model.to(device)
 
     else:
         args.tokenizer = args.tokenizer or args.model

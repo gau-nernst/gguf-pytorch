@@ -33,7 +33,7 @@ def load_state_dict(model: nn.Module, state_dict: dict[str, Tensor], assign: boo
         if hasattr(model, "tie_weights"):  # HF
             model.tie_weights()
         elif hasattr(model.lm_head, "tie_weights"):  # vLLM
-            model.lm_head.tie_weights(model.embed_tokens)
+            model.lm_head.tie_weights(model.model.embed_tokens)
         else:
             raise RuntimeError(f"Unsupported {model.__class__=}")
         missing_keys.remove("lm_head.weight")

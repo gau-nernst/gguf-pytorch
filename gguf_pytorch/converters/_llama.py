@@ -43,6 +43,8 @@ def covert_llama(
         k = k.replace("output.weight", "lm_head.weight")
         return k
 
+    dtype = gguf_state_dict["token_embd.weight"].dtype
+
     pt_state_dict = dict()
     for k, v in gguf_state_dict.items():
         # llama.cpp uses some strange layout
@@ -50,6 +52,11 @@ def covert_llama(
             v = v.view(config.num_attention_heads, -1, 2, config.hidden_size).transpose(1, 2).reshape(v.shape)
         elif k.endswith(".attn_k.weight"):
             v = v.view(config.num_key_value_heads, -1, 2, config.hidden_size).transpose(1, 2).reshape(v.shape)
+
+        # llama.cpp uses FP32 for norm weight+bias and linear bias
+        elif k.endswith("norm.weight"):
+            v = v.to(dtype)
+
         pt_state_dict[map_key(k)] = v
 
     pt_state_dict.pop("rope_freqs.weight")  # TODO: check this

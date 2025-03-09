@@ -1,5 +1,6 @@
 # https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
 
+import logging
 import math
 import struct
 import typing
@@ -10,6 +11,8 @@ import torch
 from .constants import GGML_TYPE
 from .converters import CONVERTER_LOOKUP, LOADER_LOOKUP
 from .subclasses import SUBCLASS_TYPE_LOOKUP
+
+logger = logging.getLogger(__name__)
 
 
 def _decode_number(f: typing.BinaryIO, dtype: str):
@@ -66,7 +69,7 @@ def _decode_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
     return value
 
 
-def load_gguf(filename: str, format: str = "gguf"):
+def load_gguf(filename: str, format: str = "gguf", skip_unsupported: bool = False):
     f = open(filename, "rb")
 
     assert (magic_number := f.read(4)) == b"GGUF", magic_number
@@ -120,7 +123,12 @@ def load_gguf(filename: str, format: str = "gguf"):
             tensor = subclass.from_buffer(tensor_data[offset:], ggml_type, shape)
 
         else:
-            raise ValueError(f"Unsupported {ggml_type=}")
+            msg = f"Param {name} uses unsupported {ggml_type}"
+            if skip_unsupported:
+                logger.warning(msg)
+                continue
+            else:
+                raise ValueError()
 
         state_dict[name] = tensor
 

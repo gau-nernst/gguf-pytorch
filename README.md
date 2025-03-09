@@ -2,11 +2,15 @@
 
 Goals:
 - Run GGUF models in PyTorch (via tensor subclass)
+- Run Unsloth Dynamic Quants
 - Run it faster than llama.cpp
 
 TODO:
-- [ ] Support Q8_0, Q4_0, Q4_1
+- [ ] Support Q4_0, Q4_1 (Q4_0 and Q4_1 checkpoints uses Q6_K for embedding)
 - [ ] Support K-quant
+
+Supported GGML types:
+- Q8_0
 
 ## Usage
 
