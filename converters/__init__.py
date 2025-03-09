@@ -1,7 +1,7 @@
-from ._llama import convert_llama_state_dict, load_llama
+from ._llama import covert_llama, load_llama
 
 CONVERTER_LOOKUP = dict(
-    llama=convert_llama_state_dict,
+    llama=covert_llama,
 )
 LOADER_LOOKUP = dict(
     llama=load_llama,

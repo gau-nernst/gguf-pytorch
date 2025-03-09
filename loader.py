@@ -108,7 +108,7 @@ def _decode_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
     return value
 
 
-def load_gguf(filename: str, state_dict_format: str = "gguf"):
+def load_gguf(filename: str, format: str = "gguf"):
     f = open(filename, "rb")
 
     assert (magic_number := f.read(4)) == b"GGUF", magic_number
@@ -160,15 +160,15 @@ def load_gguf(filename: str, state_dict_format: str = "gguf"):
         tensor = tensor_data[offset : offset + numel * dtype.itemsize].view(dtype).view(shape)
         state_dict[name] = tensor
 
-    if state_dict_format != "gguf":
+    if format != "gguf":
         converter = CONVERTER_LOOKUP[metadata["general.architecture"]]
-        state_dict = converter(metadata, state_dict, state_dict_format)
+        metadata, state_dict = converter(metadata, state_dict, format)
 
     return metadata, state_dict
 
 
 def load_gguf_model(filename: str):
-    metadata, state_dict = load_gguf(filename, return_hf=True)
+    metadata, state_dict = load_gguf(filename, format="hf")
 
     normal_dtype = torch.bfloat16 if any(v.dtype == torch.bfloat16 for v in state_dict.values()) else torch.float16
 
