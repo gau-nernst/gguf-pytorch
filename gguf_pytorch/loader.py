@@ -10,7 +10,7 @@ import torch
 
 from .constants import GGML_TYPE
 from .converters import CONVERTER_LOOKUP, LOADER_LOOKUP
-from .subclasses import SUBCLASS_TYPE_LOOKUP
+from .ggml_tensor import GGMLTensor
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +118,15 @@ def load_gguf(filename: str, format: str = "gguf", skip_unsupported: bool = Fals
             dtype = BASIC_TYPE_LOOKUP[ggml_type]
             tensor = tensor_data[offset : offset + numel * dtype.itemsize].view(dtype).view(shape)
 
-        elif ggml_type in SUBCLASS_TYPE_LOOKUP:
-            subclass = SUBCLASS_TYPE_LOOKUP[ggml_type]
-            tensor = subclass.from_buffer(tensor_data[offset:], ggml_type, shape)
-
         else:
-            msg = f"Param {name} uses unsupported {ggml_type}"
-            if skip_unsupported:
-                logger.warning(msg)
-                continue
-            else:
-                raise ValueError()
+            try:
+                tensor = GGMLTensor.from_buffer(tensor_data[offset:], ggml_type, shape)
+            except Exception as e:
+                msg = f"Fail to convert {name} with {ggml_type}"
+                if skip_unsupported:
+                    logger.warning(msg)
+                else:
+                    raise RuntimeError(msg) from e
 
         state_dict[name] = tensor
 

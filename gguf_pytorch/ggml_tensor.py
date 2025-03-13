@@ -4,21 +4,46 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ..constants import GGML_TYPE
+from .constants import GGML_TYPE
 
 # https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-common.h
-BLOCK_SIZE = 32
-LAYOUT_MAP = {
-    GGML_TYPE.Q8_0: [2, BLOCK_SIZE],
-    GGML_TYPE.Q4_0: [2, BLOCK_SIZE // 2],
-    GGML_TYPE.Q4_1: [2, 2, BLOCK_SIZE // 2],
-}
+LAYOUT_MAP = dict()
+
+# 01-quant - group-wise quantization
+BLOCK_01 = 32
+LAYOUT_MAP.update(
+    {
+        GGML_TYPE.Q8_0: (BLOCK_01, [2, BLOCK_01]),
+        GGML_TYPE.Q4_0: (BLOCK_01, [2, BLOCK_01 // 2]),
+        GGML_TYPE.Q4_1: (BLOCK_01, [2, 2, BLOCK_01 // 2]),
+    }
+)
+
+# K-quant - double quantization
+# - Q3_K and Q6_K: symmetric quantization (no offsets).
+# - Q6_K's scales are quantized to INT8.
+#   Q5_K, Q4_K, Q3_K's scales (and offsets) are quantized to INT6.
+#   Q2_K's scales and offsets are quantized to INT4.
+BLOCK_QK = 256
+BLOCK_QK_SCALE = 16
+SCALE_8BIT_SIZE = BLOCK_QK // BLOCK_QK_SCALE
+SCALE_6BIT_SIZE = SCALE_8BIT_SIZE // 8 * 6
+LAYOUT_MAP.update(
+    {
+        GGML_TYPE.Q8_0: (BLOCK_01, [2, BLOCK_01]),
+        GGML_TYPE.Q4_0: (BLOCK_01, [2, BLOCK_01 // 2]),
+        GGML_TYPE.Q4_1: (BLOCK_01, [2, 2, BLOCK_01 // 2]),
+        GGML_TYPE.Q6_K: (BLOCK_QK, [BLOCK_QK // 2, BLOCK_QK // 4, SCALE_8BIT_SIZE, 2]),
+        GGML_TYPE.Q5_K: (BLOCK_QK, [2, 2, SCALE_6BIT_SIZE, BLOCK_QK // 8, BLOCK_QK // 2]),
+        GGML_TYPE.Q4_K: (BLOCK_QK, [2, 2, SCALE_6BIT_SIZE, BLOCK_QK // 2]),
+    }
+)
 
 
 def _dequantize(buffer: Tensor, ggml_type: GGML_TYPE) -> Tensor:
-    layout = LAYOUT_MAP[ggml_type]
+    block_size, layout = LAYOUT_MAP[ggml_type]
     shape = list(buffer.shape)
-    shape[-1] = shape[-1] // sum(layout) * BLOCK_SIZE
+    shape[-1] = shape[-1] // sum(layout) * block_size
 
     buffer = buffer.reshape(-1, sum(layout))
 
@@ -29,29 +54,46 @@ def _dequantize(buffer: Tensor, ggml_type: GGML_TYPE) -> Tensor:
     elif ggml_type == GGML_TYPE.Q4_0:
         scales, int_data = buffer.split(layout, dim=1)
         data = torch.stack([int_data & 0xF, int_data >> 4], dim=-2).float()
-        out = (data - 8).reshape(-1, BLOCK_SIZE) * scales.view(torch.float16)
+        out = (data - 8).reshape(-1, BLOCK_01) * scales.view(torch.float16)
 
     elif ggml_type == GGML_TYPE.Q4_1:
         scales, offsets, int_data = buffer.split(layout, dim=1)
         data = torch.stack([int_data & 0xF, int_data >> 4], dim=-2).float()
-        out = data.reshape(-1, BLOCK_SIZE) * scales.view(torch.float16) + offsets.view(torch.float16)
+        out = data.reshape(-1, BLOCK_01) * scales.view(torch.float16) + offsets.view(torch.float16)
+
+    elif ggml_type == GGML_TYPE.Q6_K:
+        lo_4bits, hi_2bits, scales1, scales2 = buffer.split(layout, dim=1)
+        lo_4bits = lo_4bits.reshape(-1, 32)
+        hi_2bits = hi_2bits.reshape(-1, 32)
+        data_list = [
+            ((hi_2bits << 4) & 0x30) | (lo_4bits[0::2] & 0xF),
+            ((hi_2bits << 2) & 0x30) | (lo_4bits[1::2] & 0xF),
+            ((hi_2bits << 0) & 0x30) | (lo_4bits[0::2] >> 4),
+            ((hi_2bits >> 2) & 0x30) | (lo_4bits[1::2] >> 4),
+        ]
+        data = torch.stack(data_list, dim=-2).float() - 32
+        scales = scales1.view(torch.int8).float() * scales2.view(torch.float16)
+        out = data.reshape(scales.numel(), -1) * scales.reshape(-1, 1)
+
+    else:
+        raise NotImplementedError(ggml_type)
 
     return out.to(torch.float16).view(shape)
 
 
 def _reshape(buffer: Tensor, ggml_type: GGML_TYPE, shape: tuple[int, ...]) -> Tensor:
-    assert shape[-1] % BLOCK_SIZE == 0
-    nbytes_per_block = sum(LAYOUT_MAP[ggml_type])
-    buffer_shape = list(shape[:-1]) + [shape[-1] // BLOCK_SIZE * nbytes_per_block]
+    assert shape[-1] % BLOCK_01 == 0
+    block_size, layout = LAYOUT_MAP[ggml_type]
+    buffer_shape = list(shape[:-1]) + [shape[-1] // block_size * sum(layout)]
     return buffer.reshape(buffer_shape)
 
 
-class Quant01(Tensor):
+class GGMLTensor(Tensor):
     @staticmethod
     def __new__(cls, buffer: Tensor, ggml_type: GGML_TYPE):
         shape = list(buffer.shape)
-        nbytes_per_block = sum(LAYOUT_MAP[ggml_type])
-        shape[-1] = shape[-1] // nbytes_per_block * BLOCK_SIZE
+        block_size, layout = LAYOUT_MAP[ggml_type]
+        shape[-1] = shape[-1] // sum(layout) * block_size
         return Tensor._make_wrapper_subclass(
             cls,
             shape,
@@ -77,10 +119,10 @@ class Quant01(Tensor):
     def from_buffer(buffer: Tensor, ggml_type: GGML_TYPE, shape: tuple[int, ...]):
         assert buffer.dtype == torch.uint8
 
-        nbytes_per_block = sum(LAYOUT_MAP[ggml_type])
-        nbytes = math.prod(shape) // BLOCK_SIZE * nbytes_per_block
+        block_size, layout = LAYOUT_MAP[ggml_type]
+        nbytes = math.prod(shape) // block_size * sum(layout)
         buffer = _reshape(buffer[:nbytes], ggml_type, shape)
-        return Quant01(buffer, ggml_type)
+        return GGMLTensor(buffer, ggml_type)
 
     def dequantize(self):
         return _dequantize(self.buffer, self.ggml_type)
@@ -100,13 +142,13 @@ class Quant01(Tensor):
 
         if func is F.linear:
             x: Tensor = args[0]
-            w: Quant01 = args[1]
+            w: GGMLTensor = args[1]
             b: Tensor | None = args[2] if len(args) > 2 else None
             return F.linear(x, w.dequantize(), b)
 
         elif func is F.embedding:
             input: Tensor = args[0]
-            weight: Quant01 = args[1]
+            weight: GGMLTensor = args[1]
             return _dequantize(F.embedding(input, weight.buffer), weight.ggml_type)
 
         with torch._C.DisableTorchFunctionSubclass():
@@ -117,7 +159,7 @@ class Quant01(Tensor):
         aten = torch.ops.aten
 
         if func is aten.view.default:
-            x: Quant01 = args[0]
+            x: GGMLTensor = args[0]
             shape = list(args[1])
 
             if -1 in shape:
@@ -128,38 +170,38 @@ class Quant01(Tensor):
             else:
                 assert math.prod(shape) == x.numel()
 
-            return Quant01(_reshape(x.buffer, x.ggml_type, shape), x.ggml_type)
+            return GGMLTensor(_reshape(x.buffer, x.ggml_type, shape), x.ggml_type)
 
         elif func is aten.transpose.int:
-            x: Quant01 = args[0]
+            x: GGMLTensor = args[0]
             dim0 = args[1]
             dim1 = args[2]
 
             # if transpose involves the last dimension, we have to requantize
             assert dim0 not in (-1, x.ndim - 1)
             assert dim1 not in (-1, x.ndim - 1)
-            return Quant01(x.buffer.transpose(dim0, dim1), x.ggml_type)
+            return GGMLTensor(x.buffer.transpose(dim0, dim1), x.ggml_type)
 
         elif func is aten.cat.default:
-            tensors: list[Quant01] = args[0]
+            tensors: list[GGMLTensor] = args[0]
 
-            assert all(isinstance(x, Quant01) for x in tensors)
+            assert all(isinstance(x, GGMLTensor) for x in tensors)
             assert all(x.ggml_type == tensors[0].ggml_type for x in tensors)
             ggml_type = tensors[0].ggml_type
 
             buffer_list = [_reshape(x.buffer, ggml_type, x.shape) for x in tensors]
             buffer = func(buffer_list, *args[1:])
-            return Quant01(buffer, ggml_type)
+            return GGMLTensor(buffer, ggml_type)
 
         elif func is aten.detach.default:
-            x: Quant01 = args[0]
-            return Quant01(x.buffer, x.ggml_type)
+            x: GGMLTensor = args[0]
+            return GGMLTensor(x.buffer, x.ggml_type)
 
         elif func is aten._to_copy.default:
-            x: Quant01 = args[0]
+            x: GGMLTensor = args[0]
             # NOTE: we don't support changing dtype
             device = kwargs.get("device", None)
-            return Quant01(x.buffer.to(device=device), x.ggml_type)
+            return GGMLTensor(x.buffer.to(device=device), x.ggml_type)
 
         msg = f"{cls.__name__} dispatch: {func} is not implemented"
         for i, arg in enumerate(args):
