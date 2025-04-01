@@ -15,7 +15,7 @@ from .ggml_tensor import GGMLTensor
 logger = logging.getLogger(__name__)
 
 
-def _decode_number(f: typing.BinaryIO, dtype: str):
+def _read_number(f: typing.BinaryIO, dtype: str):
     format, nbyte = dict(
         i8=("<b", 1),
         u8=("<B", 1),
@@ -31,13 +31,13 @@ def _decode_number(f: typing.BinaryIO, dtype: str):
     return struct.unpack_from(format, f.read(nbyte))[0]
 
 
-def _decode_str(f: typing.BinaryIO):
-    return f.read(_decode_number(f, "u64")).decode()
+def _read_str(f: typing.BinaryIO):
+    return f.read(_read_number(f, "u64")).decode()
 
 
-def _decode_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
+def _read_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
     if value_type is None:
-        value_type = _decode_number(f, "u32")
+        value_type = _read_number(f, "u32")
 
     lookup = [
         "u8",
@@ -47,7 +47,7 @@ def _decode_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
         "u32",
         "i32",
         "f32",
-        "u8",  # bool
+        "bool",
         "str",
         "array",
         "u64",
@@ -58,13 +58,15 @@ def _decode_metadata_value(f: typing.BinaryIO, value_type: int | None = None):
     value_type = lookup[value_type]
 
     if value_type == "str":
-        value = _decode_str(f)
+        value = _read_str(f)
     elif value_type == "array":
-        elem_type = _decode_number(f, "u32")
-        count = _decode_number(f, "u64")
-        value = [_decode_metadata_value(f, elem_type) for _ in range(count)]
+        elem_type = _read_number(f, "u32")
+        count = _read_number(f, "u64")
+        value = [_read_metadata_value(f, elem_type) for _ in range(count)]
+    elif value_type == "bool":
+        value = bool(_read_number(f, "u8"))
     else:
-        value = _decode_number(f, value_type)
+        value = _read_number(f, value_type)
 
     return value
 
@@ -73,29 +75,32 @@ def load_gguf(filename: str, format: str = "gguf", skip_unsupported: bool = Fals
     f = open(filename, "rb")
 
     assert (magic_number := f.read(4)) == b"GGUF", magic_number
-    assert (version := _decode_number(f, "u32")) == 3, version
-    num_tensors = _decode_number(f, "u64")
-    num_metadata = _decode_number(f, "u64")
+    assert (version := _read_number(f, "u32")) == 3, version
+    num_tensors = _read_number(f, "u64")
+    num_metadata = _read_number(f, "u64")
 
     metadata = dict()
     for _ in range(num_metadata):
-        key = _decode_str(f)
-        value = _decode_metadata_value(f)
+        key = _read_str(f)
+        value = _read_metadata_value(f)
         metadata[key] = value
 
     state_dict_meta = dict()
     for _ in range(num_tensors):
-        name = _decode_str(f)
-        ndim = _decode_number(f, "u32")
-        shape = [_decode_number(f, "u64") for _ in range(ndim)][::-1]  # shape order is reversed in GGML
-        ggml_type = GGML_TYPE(_decode_number(f, "u32"))
-        offset = _decode_number(f, "u64")
+        name = _read_str(f)
+        ndim = _read_number(f, "u32")
+        shape = [_read_number(f, "u64") for _ in range(ndim)][::-1]  # shape order is reversed in GGML
+        ggml_type = GGML_TYPE(_read_number(f, "u32"))
+        offset = _read_number(f, "u64")
 
         state_dict_meta[name] = (shape, ggml_type, offset)
 
     alignment = metadata.get("general.alignment", 32)
     base_offset = (f.tell() + alignment - 1) // alignment * alignment
     f.close()
+
+    if num_tensors == 0:
+        return metadata, dict()
 
     state_dict = dict()
     tensor_data = torch.from_numpy(np.memmap(filename, mode="r", offset=base_offset))
