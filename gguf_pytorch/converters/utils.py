@@ -1,5 +1,10 @@
+import logging
+import traceback
+
 import torch
 from torch import Tensor, nn
+
+logger = logging.getLogger(__name__)
 
 
 def merge_weights(state_dict: dict[str, Tensor], old_labels: list[str], new_label: str):
@@ -20,7 +25,17 @@ def merge_weights(state_dict: dict[str, Tensor], old_labels: list[str], new_labe
                 break
 
     for name in new_names:
-        state_dict[name] = torch.cat(state_dict[name], dim=0)
+        try:
+            combined = torch.cat(state_dict[name], dim=0)
+        except:
+            logging.warning(
+                f"Unable to combine {old_labels} due to\n"
+                f"{traceback.format_exc()}\n"
+                "Trying to dequantize them first"
+            )
+            combined = torch.cat([x.dequantize() for x in state_dict[name]], dim=0)
+
+        state_dict[name] = combined
 
     return state_dict
 
