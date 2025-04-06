@@ -40,6 +40,7 @@ LAYOUT_MAP.update(
 )
 
 
+# https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c
 def _dequantize(buffer: Tensor, ggml_type: GGML_TYPE) -> Tensor:
     block_size, layout = LAYOUT_MAP[ggml_type]
     shape = list(buffer.shape)
@@ -62,7 +63,7 @@ def _dequantize(buffer: Tensor, ggml_type: GGML_TYPE) -> Tensor:
         out = data.reshape(-1, BLOCK_01) * scales.view(torch.float16) + offsets.view(torch.float16)
 
     elif ggml_type == GGML_TYPE.Q6_K:
-        lo_4bits, hi_2bits, scales1, scales2 = buffer.split(layout, dim=1)
+        lo_4bits, hi_2bits, i8_scales, f16_scales = buffer.split(layout, dim=1)
         lo_4bits = lo_4bits.reshape(-1, 32)
         hi_2bits = hi_2bits.reshape(-1, 32)
         data_list = [
@@ -72,13 +73,16 @@ def _dequantize(buffer: Tensor, ggml_type: GGML_TYPE) -> Tensor:
             ((hi_2bits >> 2) & 0x30) | (lo_4bits[1::2] >> 4),
         ]
         data = torch.stack(data_list, dim=-2).float() - 32
-        scales = scales1.view(torch.int8).float() * scales2.view(torch.float16)
+        scales = i8_scales.view(torch.int8).float() * f16_scales.view(torch.float16)
         out = data.reshape(scales.numel(), -1) * scales.reshape(-1, 1)
+
+    # elif ggml_type == GGML_TYPE.Q4_K:
+    #     f16_scales, f16_offset_scales, i8_scales, i4_data = buffer.split(layout, dim=1)
 
     else:
         raise NotImplementedError(ggml_type)
 
-    return out.to(torch.float16).view(shape)
+    return out.view(shape)
 
 
 def _reshape(buffer: Tensor, ggml_type: GGML_TYPE, shape: tuple[int, ...]) -> Tensor:
@@ -144,12 +148,12 @@ class GGMLTensor(Tensor):
             x: Tensor = args[0]
             w: GGMLTensor = args[1]
             b: Tensor | None = args[2] if len(args) > 2 else None
-            return F.linear(x, w.dequantize(), b)
+            return F.linear(x, w.dequantize().to(w.dtype), b)
 
         elif func is F.embedding:
             input: Tensor = args[0]
             weight: GGMLTensor = args[1]
-            return _dequantize(F.embedding(input, weight.buffer), weight.ggml_type)
+            return _dequantize(F.embedding(input, weight.buffer), weight.ggml_type).to(weight.dtype)
 
         with torch._C.DisableTorchFunctionSubclass():
             return func(*args, **kwargs)
@@ -193,9 +197,9 @@ class GGMLTensor(Tensor):
             buffer = func(buffer_list, *args[1:])
             return GGMLTensor(buffer, ggml_type)
 
-        elif func is aten.detach.default:
+        elif func in (aten.detach.default, aten.clone.default):
             x: GGMLTensor = args[0]
-            return GGMLTensor(x.buffer, x.ggml_type)
+            return GGMLTensor(func(x.buffer), x.ggml_type)
 
         elif func is aten._to_copy.default:
             x: GGMLTensor = args[0]
